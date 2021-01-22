@@ -48,6 +48,7 @@ describe('POST /events', () => {
 
       // Content information
       path: '/github/docs/issues',
+      hostname: 'github.com',
       referrer: 'https://github.com/github/docs',
       search: '?q=is%3Aissue+is%3Aopen+example+',
       href: 'https://github.com/github/docs/issues?q=is%3Aissue+is%3Aopen+example+',
@@ -134,6 +135,16 @@ describe('POST /events', () => {
         context: {
           ...pageExample.context,
           path: ' '
+        }
+      }, 400)
+    )
+
+    it('should hostname be uri-reference', () =>
+      checkEvent({
+        ...pageExample,
+        context: {
+          ...pageExample.context,
+          hostname: ' '
         }
       }, 400)
     )
@@ -409,6 +420,54 @@ describe('POST /events', () => {
 
     it('experiment_success is optional boolean', () =>
       checkEvent({ ...experimentExample, experiment_success: undefined }, 201)
+    )
+  })
+
+  describe('redirect', () => {
+    const redirectExample = {
+      ...baseExample,
+      type: 'redirect',
+      redirect_from: 'http://example.com/a',
+      redirect_to: 'http://example.com/b'
+    }
+
+    it('should record an redirect event', () =>
+      checkEvent(redirectExample, 201)
+    )
+
+    it('redirect_from is required url', () =>
+      checkEvent({ ...redirectExample, redirect_from: ' ' }, 400)
+    )
+
+    it('redirect_to is required url', () =>
+      checkEvent({ ...redirectExample, redirect_to: undefined }, 400)
+    )
+  })
+
+  describe('clipboard', () => {
+    const clipboardExample = {
+      ...baseExample,
+      type: 'clipboard',
+      clipboard_operation: 'copy'
+    }
+
+    it('should record an clipboard event', () =>
+      checkEvent(clipboardExample, 201)
+    )
+
+    it('clipboard_operation is required copy, paste, cut', () =>
+      checkEvent({ ...clipboardExample, clipboard_operation: 'destroy' }, 400)
+    )
+  })
+
+  describe('print', () => {
+    const printExample = {
+      ...baseExample,
+      type: 'print'
+    }
+
+    it('should record a print event', () =>
+      checkEvent(printExample, 201)
     )
   })
 })
