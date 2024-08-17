@@ -1,1 +1,0 @@
-`número`|`inteiro` | O número do pull request. `alterações`|`objeto`| As alterações no comentário se a ação foi `editada`. `changes[title][from]`|`string` | The previous version of the title if the action was `edited`. `changes[body][from]`|`string` | The previous version of the body if the action was `edited`. `pull_request`|`objeto` | O próprio [pull request](/v3/pulls).

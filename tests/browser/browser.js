@@ -1,165 +1,420 @@
-/* global page, browser */
-const sleep = require('await-sleep')
-const querystring = require('querystring')
+import fs from 'fs'
+import path from 'path'
+import { jest } from '@jest/globals'
+import { oldestSupported } from '../../lib/enterprise-server-releases.js'
 
+import { getDOM } from '../helpers/e2etest.js'
+import frontmatter from '../../lib/read-frontmatter.js'
+import getApplicableVersions from '../../lib/get-applicable-versions.js'
+import { allVersions } from '../../lib/all-versions.js'
+import renderContent from '../../lib/render-content/index.js'
+import shortVersionsMiddleware from '../../middleware/contextualizers/short-versions.js'
+
+jest.useFakeTimers({ legacyFakeTimers: true })
+const req = {}
+/* global page, browser */
 describe('homepage', () => {
-  test('should be titled "GitHub Documentation"', async () => {
-    await page.goto('http://localhost:4001')
-    await expect(page.title()).resolves.toMatch('GitHub Documentation')
+  jest.setTimeout(60 * 1000)
+
+  test('should be titled "GitHub Docs"', async () => {
+    await page.goto('http://localhost:4000')
+    await expect(page.title()).resolves.toMatch('GitHub Docs')
   })
 })
 
-describe('algolia browser search', () => {
-  it('works on the homepage', async () => {
-    await page.goto('http://localhost:4001/en')
-    await page.click('#search-input-container input[type="search"]')
-    await page.type('#search-input-container input[type="search"]', 'actions')
-    await page.waitForSelector('.ais-Hits')
-    const hits = await page.$$('.ais-Hits-item')
+// Note: we can only test Elasticsearch searches on things we have indexed
+// in the fixtures. See the contents of /src/search/tests/fixtures/search-indexes
+describe('browser search', () => {
+  jest.setTimeout(60 * 1000)
+
+  it('works on small and x-small viewport landing pages', async () => {
+    await page.setViewport({ width: 500, height: 700 })
+    await page.goto('http://localhost:4000/en/actions')
+    await page.click('[data-testid=mobile-search-button]')
+    await page.click('[data-testid=site-search-input]')
+    await page.type('[data-testid=site-search-input]', 'foo')
+    await page.keyboard.press('Enter')
+    await page.waitForSelector('[data-testid=search-result]')
+    const hits = await page.$$('[data-testid=search-result]')
+    expect(hits.length).toBeGreaterThan(1)
+  })
+
+  it('works on medium -> x-large viewport landing pages', async () => {
+    const initialViewport = page.viewport()
+    await page.setViewport({ width: 1000, height: 768 })
+    await page.goto('http://localhost:4000/en/actions')
+    await page.click('[data-testid=desktop-header] [data-testid=site-search-input]')
+    await page.type('[data-testid=desktop-header] [data-testid=site-search-input]', 'foo')
+    await page.keyboard.press('Enter')
+    await page.waitForSelector('[data-testid=search-result]')
+    const hits = await page.$$('[data-testid=search-result]')
+    expect(hits.length).toBeGreaterThan(1)
+    await page.setViewport(initialViewport)
+  })
+  // 404 page is statically generated with next, so search is not available, but may possibly be brought back
+  // Docs Engineering issue: 961
+  it.skip('works on 404 error page', async () => {
+    await page.goto('http://localhost:4000/en/404')
+    await page.click('[data-testid=search] input[type="search"]')
+    await page.type('[data-testid=search] input[type="search"]', 'actions')
+    await page.keyboard.press('Enter')
+    await page.waitForSelector('[data-testid=search-results]')
+    const hits = await page.$$('[data-testid=search-result]')
     expect(hits.length).toBeGreaterThan(5)
   })
 
-  it('works on article pages', async () => {
-    await page.goto('http://localhost:4001/en/actions')
-    await page.click('#search-input-container input[type="search"]')
-    await page.type('#search-input-container input[type="search"]', 'workflows')
-    await page.waitForSelector('.ais-Hits')
-    const hits = await page.$$('.ais-Hits-item')
-    expect(hits.length).toBeGreaterThan(5)
-  })
+  // Elasticsearch fixtures only work for dotco and GHAE
+  it.skip('sends the correct data to search for Enterprise Server', async () => {
+    expect.assertions(2)
 
-  it('works on 404 error page', async () => {
-    await page.goto('http://localhost:4001/en/404')
-    await page.click('#search-input-container input[type="search"]')
-    await page.type('#search-input-container input[type="search"]', 'actions')
-    await page.waitForSelector('.ais-Hits')
-    const hits = await page.$$('.ais-Hits-item')
-    expect(hits.length).toBeGreaterThan(5)
-  })
-
-  it('sends the correct data to algolia', async () => {
     const newPage = await browser.newPage()
-    await newPage.goto('http://localhost:4001/ja/enterprise/2.22/admin/installation')
+    await newPage.goto(
+      `http://localhost:4000/en/enterprise-server@${oldestSupported}/admin/installation`
+    )
 
     await newPage.setRequestInterception(true)
-    newPage.on('request', interceptedRequest => {
-      if (interceptedRequest.method() === 'POST' && /algolia/i.test(interceptedRequest.url())) {
-        const data = JSON.parse(interceptedRequest.postData())
-        const { indexName, params } = data.requests[0]
-        const parsedParams = querystring.parse(params)
-        const analyticsTags = JSON.parse(parsedParams.analyticsTags)
-        expect(indexName).toBe('github-docs-2.22-ja')
-        expect(analyticsTags).toHaveLength(2)
-        // browser tests are run against production build, so we are expecting env:production
-        expect(analyticsTags).toEqual(expect.arrayContaining(['site:docs.github.com', 'env:production']))
+    newPage.on('request', (interceptedRequest) => {
+      if (
+        interceptedRequest.method() === 'GET' &&
+        /api\/search\/legacy\?/i.test(interceptedRequest.url())
+      ) {
+        const { searchParams } = new URL(interceptedRequest.url())
+        expect(searchParams.get('version')).toBe(oldestSupported)
+        expect(searchParams.get('language')).toBe('en')
       }
       interceptedRequest.continue()
     })
 
-    await newPage.click('#search-input-container input[type="search"]')
-    await newPage.type('#search-input-container input[type="search"]', 'test')
+    const searchInput = await newPage.$('[data-testid=site-search-input]')
+    await searchInput.click()
+    await searchInput.type('code')
+    await page.keyboard.press('Enter')
+    await newPage.waitForSelector('[data-testid=search-result]')
   })
 
-  it('removes `algolia-query` query param after page load', async () => {
-    await page.goto('http://localhost:4001/en?algolia-query=helpme')
+  it('sends the correct data to search for dotcom', async () => {
+    expect.assertions(2)
 
-    // check that the query is still present at page load
-    let location = await getLocationObject(page)
-    expect(location.search).toBe('?algolia-query=helpme')
+    const newPage = await browser.newPage()
+    await newPage.goto('http://localhost:4000/en')
 
-    // query removal is in a setInterval, so wait a bit
-    await sleep(1000)
+    await newPage.setRequestInterception(true)
+    newPage.on('request', (interceptedRequest) => {
+      if (
+        interceptedRequest.method() === 'GET' &&
+        /api\/search\/v1\?/i.test(interceptedRequest.url())
+      ) {
+        const { searchParams } = new URL(interceptedRequest.url())
+        expect(searchParams.get('version')).toBe('free-pro-team@latest')
+        expect(searchParams.get('language')).toBe('en')
+      }
+      interceptedRequest.continue()
+    })
 
-    // check that the query has been removed after a bit
-    location = await getLocationObject(page)
-    expect(location.search).toBe('')
+    const searchInput = await newPage.$('[data-testid=site-search-input]')
+    await searchInput.click()
+    await searchInput.type('foo')
+    await newPage.keyboard.press('Enter')
+    await newPage.waitForSelector('[data-testid=search-result]')
   })
 
-  it('does not remove hash when removing `algolia-query` query', async () => {
-    await page.goto('http://localhost:4001/en?algolia-query=helpme#some-header')
+  it('sends the correct data to search for GHAE', async () => {
+    expect.assertions(2)
 
-    // check that the query is still present at page load
-    let location = await getLocationObject(page)
-    expect(location.search).toBe('?algolia-query=helpme')
+    const newPage = await browser.newPage()
+    await newPage.goto('http://localhost:4000/en/github-ae@latest/admin/overview')
 
-    // query removal is in a setInterval, so wait a bit
-    await sleep(1000)
+    await newPage.setRequestInterception(true)
+    newPage.on('request', (interceptedRequest) => {
+      if (
+        interceptedRequest.method() === 'GET' &&
+        /api\/search\/v1\?/i.test(interceptedRequest.url())
+      ) {
+        const { searchParams } = new URL(interceptedRequest.url())
+        expect(searchParams.get('version')).toBe('github-ae@latest')
+        expect(searchParams.get('language')).toBe('en')
+      }
+      interceptedRequest.continue()
+    })
 
-    // check that the query has been removed after a bit
-    location = await getLocationObject(page)
-    expect(location.search).toBe('')
-    expect(location.hash).toBe('#some-header')
+    const searchInput = await newPage.$('[data-testid=site-search-input]')
+    await searchInput.click()
+    await searchInput.type('silly')
+    await newPage.keyboard.press('Enter')
+    await newPage.waitForSelector('[data-testid=search-results]')
   })
 })
 
-describe('google analytics', () => {
-  it('is set on page load with expected properties', async () => {
-    await page.goto('http://localhost:4001/en/actions')
+describe('small -> x-small viewports - under 544 -> 767', () => {
+  jest.setTimeout(60 * 1000)
+  it('sign up button is not visible', async () => {
+    await page.setViewport({ width: 500, height: 700 })
+    await page.goto('http://localhost:4000/en/actions')
+    const signUpElement = await page.$('[data-testid=header-signup] a')
+    const classes = Object.values(await signUpElement.evaluate((el) => el.classList))
+    expect(classes).toEqual(expect.arrayContaining(['d-none', 'd-lg-flex']))
+  })
 
-    // check that GA global object exists and is a function
-    const gaObjectType = await page.evaluate(() => typeof window.ga)
-    expect(gaObjectType).toBe('function')
+  it('language picker is not visible', async () => {
+    const languagePickerElement = await page.$('[data-testid=language-picker]')
+    const parentNode = await languagePickerElement.getProperty('parentNode')
+    const classes = Object.values(await parentNode.evaluate((el) => el.classList))
+    expect(classes).toEqual(expect.arrayContaining(['d-none', 'd-lg-flex']))
+  })
 
-    // check that default tracker is set
-    // https://developers.google.com/analytics/devguides/collection/analyticsjs/ga-object-methods-reference#getByName
-    const gaDefaultTracker = await page.evaluate(() => window.ga.getByName('t0'))
-    expect('filters' in gaDefaultTracker).toBe(true)
-    expect(Object.keys(gaDefaultTracker)).toHaveLength(3)
+  it('version picker is not visible', async () => {
+    const hiddenElements = await page.evaluate(() => {
+      const data = []
+      const elements = document.getElementsByClassName('hide-sm')
+      for (const element of elements)
+        data.push(element.firstElementChild.getAttribute('data-testid'))
 
-    // check that default cookies are set
-    // https://developers.google.com/analytics/devguides/collection/analyticsjs/cookie-usage#analyticsjs
-    const cookies = await page.cookies()
-    expect(cookies.some(cookie => cookie.name === '_gat')).toBe(true)
-    expect(cookies.some(cookie => cookie.name === '_gid')).toBe(true)
+      return data
+    })
+    expect(hiddenElements).toEqual(['version-picker'])
+  })
+
+  it('version picker icon is in mobile menu', async () => {
+    await page.click('[data-testid=mobile-menu]')
+    await page.click('[data-testid=open-mobile-menu] [data-testid=version-picker]')
+    const versionItems = await page.$$('[data-testid=version-picker-item]')
+    expect(versionItems.length).toBeGreaterThan(0)
+  })
+
+  it('language picker icon is in mobile menu', async () => {
+    await page.click('[data-testid=open-mobile-menu] [data-testid=language-picker]')
+    const defaultLanguageElement = await page.$('[data-testid=default-language]')
+    const languageValue = await defaultLanguageElement.evaluate((el) => el.textContent)
+    expect(languageValue).toBe('English')
+  })
+
+  it('sign up button is in mobile menu', async () => {
+    const signUpElement = await page.$('[data-testid=mobile-signup]')
+    const signUpValue = await signUpElement.evaluate((el) => el.textContent)
+    expect(signUpValue).toBe('Sign up')
+  })
+
+  it('hamburger button for sidebar overlay is visible', async () => {
+    await page.click('[data-testid=sidebar-hamburger]')
+    const sidebarElement = await page.$('[data-testid=sidebar-product-dialog]')
+    const sideBarValue = await sidebarElement.evaluate((el) => el.textContent)
+    expect(sideBarValue).toBe('GitHub Actions')
   })
 })
 
-describe('helpfulness', () => {
+describe('survey', () => {
+  jest.setTimeout(3 * 60 * 1000)
+
   it('sends an event to /events when submitting form', async () => {
     // Visit a page that displays the prompt
-    await page.goto('http://localhost:4001/en/actions/getting-started-with-github-actions/about-github-actions')
+    await page.goto(
+      'http://localhost:4000/en/actions/getting-started-with-github-actions/about-github-actions'
+    )
 
     // Track network requests
     await page.setRequestInterception(true)
-    page.on('request', request => {
-      // Ignore GET to google analytics
-      if (!/\/events/.test(request.method())) return request.continue()
+    page.on('request', (request) => {
+      // Ignore GET requests
+      if (!/\/events$/.test(request.url())) return request.continue()
       expect(request.method()).toMatch(/POST|PUT/)
       request.respond({
         contentType: 'application/json',
         body: JSON.stringify({ id: 'abcd1234' }),
-        status: 200
+        status: 200,
       })
     })
 
     // When I click the "Yes" button
-    await page.click('#helpfulness-sm [for=helpfulness-yes-sm]')
+    await page.click('[data-testid=survey-form] [for=survey-yes]')
     // (sent a POST request to /events)
     // I see the request for my email
-    await page.waitForSelector('#helpfulness-sm [type="email"]')
+    await page.waitForSelector('[data-testid=survey-form] [type="email"]')
 
     // When I fill in my email and submit the form
-    await page.type('#helpfulness-sm [type="email"]', 'test@example.com')
+    await page.type('[data-testid=survey-form] [type="email"]', 'test@example.com')
 
-    await sleep(1000)
-
-    await page.click('#helpfulness-sm [type="submit"]')
+    await page.click('[data-testid=survey-form] [type="submit"]')
     // (sent a PUT request to /events/{id})
     // I see the feedback
-    await page.waitForSelector('#helpfulness-sm [data-help-end]')
+    await page.waitForSelector('[data-testid=survey-end]')
   })
 })
 
-describe('csrf meta', () => {
-  it('should have a csrf-token meta tag on the page', async () => {
-    await page.goto('http://localhost:4001/en/actions/getting-started-with-github-actions/about-github-actions')
-    await page.waitForSelector('meta[name="csrf-token"]')
+// Skipping because next/links are disabled by default for now
+// Docs Engineering issue: 962
+describe.skip('next/link client-side navigation', () => {
+  jest.setTimeout(60 * 1000)
+
+  it('should have 200 response to /_next/data when link is clicked', async () => {
+    const initialViewport = page.viewport()
+    await page.setViewport({ width: 1024, height: 768 })
+    await page.goto('http://localhost:4000/en/actions/guides')
+
+    const [response] = await Promise.all([
+      page.waitForResponse((response) =>
+        response.url().startsWith('http://localhost:4000/_next/data')
+      ),
+      page.waitForNavigation({ waitUntil: 'networkidle2' }),
+      page.click(
+        '[data-testid=sidebar-article-group]:nth-child(2) [data-testid=sidebar-article]:nth-child(1) a'
+      ),
+    ])
+
+    expect(response.status()).toBe(200)
+    await page.setViewport(initialViewport)
   })
 })
 
-async function getLocationObject (page) {
-  const location = await page.evaluate(() => {
-    return Promise.resolve(JSON.stringify(window.location, null, 2))
+describe('iframe pages', () => {
+  it('can open YouTube embed iframes', async () => {
+    // Going to create a fresh page instance, so we can intercept the requests.
+    const newPage = await browser.newPage()
+
+    await newPage.setRequestInterception(true)
+    const interceptedURLs = []
+    newPage.on('request', (request) => {
+      interceptedURLs.push(request.url())
+      request.continue()
+    })
+    const failedURLs = []
+    newPage.on('requestfailed', (request) => {
+      failedURLs.push(request.url())
+      request.continue()
+    })
+
+    // Hardcoded path to a page where we know we have a YouTube embed
+    const res = await newPage.goto('http://localhost:4000/en/codespaces')
+
+    expect(res.ok()).toBeTruthy()
+    expect(failedURLs.length, `Following URLs ${failedURLs.join(', ')} failed`).toBeFalsy()
+
+    const iframeSrc = await newPage.$eval('iframe', (el) => el.src)
+    expect(iframeSrc.startsWith('https://www.youtube-nocookie.com/embed')).toBeTruthy()
+    expect(
+      interceptedURLs.filter((url) => url.startsWith('https://www.youtube-nocookie.com/')).length
+    ).toBeTruthy()
   })
-  return JSON.parse(location)
+})
+
+describe('REST sidebar', () => {
+  req.context = {
+    allVersions,
+    currentLanguage: 'en',
+  }
+
+  it('Check REST categories and subcategories are rendering', async () => {
+    // Get the titles from the content/rest directory to match the titles on the page
+    const contentFiles = getCatAndSubCat('content/rest')
+    const contentCheck = await createContentCheckDirectory(contentFiles)
+
+    for (const version in allVersions) {
+      // Get MapTopic level categories/subcategories for each version on /rest page
+      const url = `/en/${version}/rest`
+      const $ = await getDOM(url)
+
+      const categories = []
+      $('[data-testid=sidebar] [data-testid=rest-category]').each((i, el) => {
+        categories[i] = $(el).text()
+      })
+      const browserUrl = `http://localhost:4000${url}`
+      await page.goto(browserUrl)
+      await page.setViewport({ width: 1024, height: 768 })
+      await page.waitForSelector('[data-testid=rest-category] li div div span')
+
+      await page.evaluate(() => {
+        Array.from(
+          document.querySelectorAll('[data-testid=rest-category] li div div span')
+        ).forEach(async (element) => {
+          if (element) element.click()
+        })
+      })
+
+      const subcategories = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid=rest-subcategory] li div div span')).map(
+          (subCategory) => subCategory.textContent
+        )
+      )
+      expect(contentCheck[version].cat.length).toBe(categories.length)
+      expect(contentCheck[version].subcat.length).toBe(subcategories.length)
+
+      categories.forEach((category) => {
+        expect(contentCheck[version].cat).toContain(category)
+      })
+
+      subcategories.forEach((subcategory) => {
+        expect(contentCheck[version].subcat).toContain(subcategory)
+      })
+    }
+  })
+})
+
+// Recursively go through the content/rest directory and get all the absolute file names
+function getCatAndSubCat(root) {
+  const files = []
+  for (const dirent of fs.readdirSync(root, { withFileTypes: true })) {
+    const { name } = dirent
+    const file = path.join(root, name)
+    if (dirent.isDirectory()) {
+      if (!(name === 'guides' || name === 'overview')) {
+        files.push(...getCatAndSubCat(file))
+      }
+    } else if (
+      !(
+        name === 'README.md' ||
+        file.includes('rest/index.md') ||
+        file.includes('rest/quickstart.md')
+      )
+    ) {
+      files.push(file)
+    }
+  }
+  return files
+}
+
+// Create a ContentCheck object that has all the categories/subcategories and get the title from frontmatter
+async function createContentCheckDirectory(contentFiles) {
+  const contentCheck = Object.keys(allVersions).reduce((acc, val) => {
+    return { ...acc, [val]: { cat: [], subcat: [] } }
+  }, {})
+
+  const renderOpts = { textOnly: true }
+
+  for (const filename of contentFiles) {
+    const { data } = frontmatter(await fs.promises.readFile(filename, 'utf8'))
+    const applicableVersions = getApplicableVersions(data.versions, filename)
+    const splitPath = filename.split('/')
+    let category = ''
+    let subCategory = ''
+
+    if (splitPath[splitPath.length - 2] === 'rest') {
+      category = data.title
+    } else if (splitPath[splitPath.length - 3] === 'rest') {
+      filename.includes('index.md')
+        ? (category = data.shortTitle || data.title)
+        : (subCategory = data.shortTitle || data.title)
+    }
+    for (const version of applicableVersions) {
+      req.context.currentVersion = version
+
+      if (category !== '')
+        if (category.includes('{')) {
+          await shortVersionsMiddleware(req, null, () => {})
+          contentCheck[version].cat.push(
+            await renderContent.liquid.parseAndRender(category, req.context, renderOpts)
+          )
+        } else {
+          contentCheck[version].cat.push(category)
+        }
+      if (subCategory !== '')
+        if (subCategory.includes('{')) {
+          await shortVersionsMiddleware(req, null, () => {})
+          contentCheck[version].subcat.push(
+            await renderContent.liquid.parseAndRender(subCategory, req.context, renderOpts)
+          )
+        } else {
+          contentCheck[version].subcat.push(subCategory)
+        }
+    }
+  }
+  return contentCheck
 }
